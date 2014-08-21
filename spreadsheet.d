@@ -1,28 +1,84 @@
 module spreadsheet;
-import std.stdio, std.regex, std.conv, std.string;
+import std.stdio, std.regex, std.conv, std.string, std.array, std.algorithm, std.range;
 
-class Spreadsheet
+private enum rangeRegex = ctRegex!r"([A-Z]+)([0-9]+)(:([A-Z]+)([0-9]+))?";
+private enum singleCellRegex = ctRegex!r"^[A-Z]+[0-9]+$";
+private enum equationRegex = ctRegex!r"^([A-Z]*[0-9]+)([\+\-\*\/\^])([A-Z]*[0-9]+)$";
+
+struct CellValue
 {
-	void Operation(string input)
+	string expression = "0";
+	@property double value() { return evaluate(expression); };
+
+	ref CellValue opAssign(string expression)
 	{
-		auto singleCellRegex = ctRegex!r"([A-Z]+)([0-9]+)";
-		if(match(input, singleCellRegex))
-		{
-		}
-		else
-			writeln("invalid");
+		this.expression = expression;
+		return this;
 	}
 
-	string[Cell] worksheet;
-	Cell[] selected;
-
-	Cell[] selectCells(string formula)
+	double opBinary(string op)(CellValue rhs)
 	{
-		auto rangeRegex = ctRegex!r"([A-Z]+)([0-9]+)(:([A-Z]+)([0-9]+))?";
+		return mixin("this.value" ~ op ~ "rhs.value");
+	}
 
-		auto selected = List!Cell();
+	double func(string formula, double[] values)
+	{
+		double result;
+		if(formula.startsWith("SUM")) 
+		{
+			result = reduce!((a,b) => a + b)(0.0,values);
+		}
+		else if(formula.startsWith("AVG")) 
+		{
+			result = reduce!((a,b) => a + b / values.count)(0.0,values);
+		}
+		else if(formula.startsWith("PROD")) 
+		{
+			result = reduce!((a,b) => a * b)(1.0,values);
+		}
+		return result;
+	}
 
-		foreach(cnt, relativePart; split(formula, '~')) 
+	double evaluate(string expression)
+	{
+		double result = 0;
+
+		if(match(expression, ctRegex!r"^\d+$")) return to!double(expression);
+		else if(match(expression, singleCellRegex)) return evaluate(expression);
+		else if(auto m = match(expression, equationRegex))
+		{
+			string op = m.captures[2];
+			switch(op)
+			{
+				case "+": result = CellValue(m.captures[1]) + CellValue(m.captures[3]); break;
+				case "-": result = CellValue(m.captures[1]) - CellValue(m.captures[3]); break;
+				case "*": result = CellValue(m.captures[1]) * CellValue(m.captures[3]); break;
+				case "/": result = CellValue(m.captures[1]) / CellValue(m.captures[3]); break;
+				case "^": result = CellValue(m.captures[1]) ^^ CellValue(m.captures[3]); break;
+					
+				default: break;
+			}
+		}
+		else
+		{
+			CellRange cells = CellRange(match(expression, rangeRegex).captures[0]);
+			auto values = map!(a => a.value)(cells.values);
+			result = func(expression, values.array);
+		}
+
+		return result;
+	}
+}
+
+struct CellRange
+{
+	CellValue[string] Cells;
+	alias Cells this;
+
+	this(string range, string expression)
+	{
+		bool add = true;
+		foreach(relativePart; split(range, '~')) 
 		{
 			foreach(rangePart; split(relativePart, '&'))
 			{
@@ -34,64 +90,116 @@ class Spreadsheet
 
 				foreach(i; colmin..colmax)
 					foreach(j; rowmin..rowmax)
-						if (!cnt) selected.add(Cell(i,j));
-						else selected.del(Cell(i,j));
+					{
+						string cell = text(toBase26(i+1), j + 1);
+						if (add) Cells[cell] = CellValue(expression);
+						else Cells.remove(cell);
+					}
 			}
+			add = !add;
 		}
-
-		return selected.array;
 	}
 
-	pure string toBase26(int n)
+	this(string range)
 	{
-		char[] ret;
-		while(n > 0)
-		{
-			--n;
-			ret ~= ('A' + (n%26));
-			n /= 26;
-		}
-
-		return cast(string)ret.reverse;
+		this(range, "0");
 	}
 
-	pure int fromBase26(string number)
+	ref CellRange opAssign(string expression)
 	{
-		number = number.toUpper;
-		int decimalValue = 0;
-		for(int i = number.length-1; i > -1; i--)
+		foreach(cell; Cells.keys)
 		{
-			decimalValue += 25 * i;
-			decimalValue += (number[i] - 64);
+			Cells[cell] = expression;
 		}
-		return decimalValue;
+		return this;
+	}
+
+	ref CellRange opOpAssign(string op)(CellRange range)
+	{
+		return this ~ range;
+	}
+
+	ref CellRange opBinary(string op)(CellRange range)
+		if(op == "~")
+	{
+		foreach(cell, exp; range)
+		{
+			this[cell] = exp;
+		}
+		return this;
 	}
 }
 
-private:
-struct Cell
+class Spreadsheet
 {
-	int x,y;
-	string toString() { return text(x, ",", y); }
+	CellRange worksheet;
+
+	void Operation(string input)
+	{
+		input = input.toUpper.strip;
+		input = replaceAll(input, ctRegex!r"\s", "");
+
+		if(match(input, singleCellRegex)) writeln(lookupCell(input));
+		else if(indexOf(input, '=') > -1)
+		{
+			auto equation = split(input, '=');
+			setCells(equation[0], equation[1]);
+		}
+	}
+
+	void setCells(string range, string value)
+	{
+		worksheet ~= CellRange(range) = value;
+	}
+
+	double lookupCell(string cell)
+	{
+		return cell in worksheet ? worksheet[cell].value : 0;
+	}
+
+	double binary(double lhs, double rhs, string op)
+	{
+		double result;
+		switch(op)
+		{
+			case "+":
+				result = lhs + rhs; break;
+			case "-":
+				result = lhs - rhs; break;
+			case "*":
+				result = lhs * rhs; break;
+			case "/":
+				result = lhs / rhs; break;
+			case "^":
+				result = lhs ^^ rhs; break;
+			default:
+				result = double.nan;
+		}
+		return result;
+	}
 }
 
-struct List(T)
+pure string toBase26(int n)
 {
-	private T[] _elements;
-	@property int count() { return _elements.length; }
-	@property T[] array() { return _elements.dup; }
-	void add(T item) { _elements ~= item; }
-	T get(int index) { return _elements[index]; }
-
-	void del(T item)
+	char[] ret;
+	while(n > 0)
 	{
-		foreach(i, e; _elements)
-			if(e == item) 
-			{
-				if(i == 0) _elements = _elements[1..$];
-				else if(i == _elements.length - 1) _elements = _elements[0..$-1];
-				else _elements = _elements[0..i] ~ _elements[i+1..$];
-				break;
-			}
+		--n;
+		ret ~= ('A' + (n%26));
+		n /= 26;
 	}
+
+	return cast(string)ret.reverse;
+}
+
+pure int fromBase26(string number)
+{
+	number = number.toUpper;
+	int decimalValue = 0;
+	for(int i = number.length-1; i > -1; i--)
+	{
+		decimalValue += 25 * i;
+		decimalValue += (number[i] - 64);
+	}
+	return decimalValue;
 }
